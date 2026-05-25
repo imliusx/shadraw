@@ -1,0 +1,33 @@
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gosimple
+    - ineffassign
+    - unused
+    - gofumpt
+    - revive
+    - misspell
+    - bodyclose
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+      - name: var-naming
+      - name: unused-parameter
+        disabled: true
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - bodyclose

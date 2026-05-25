@@ -1,0 +1,9 @@
+/data/
+/pgdata/
+/.env
+/tmp/
+/bin/
+*.test
+*.out
+coverage.txt
+.DS_Store
