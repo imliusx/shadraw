@@ -15,12 +15,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/liusx/shadraw/internal/admin"
 	"github.com/liusx/shadraw/internal/app"
 	"github.com/liusx/shadraw/internal/auth"
+	"github.com/liusx/shadraw/internal/blob"
 	"github.com/liusx/shadraw/internal/config"
+	"github.com/liusx/shadraw/internal/crypto"
 	"github.com/liusx/shadraw/internal/httpx"
+	"github.com/liusx/shadraw/internal/record"
 	"github.com/liusx/shadraw/internal/store"
+	"github.com/liusx/shadraw/internal/upstream"
 	"github.com/liusx/shadraw/internal/user"
+	"github.com/liusx/shadraw/internal/worker"
 )
 
 func main() {
@@ -54,14 +60,49 @@ func run() error {
 		}
 	}()
 
+	cipher, err := crypto.New(cfg.MasterKey)
+	if err != nil {
+		return fmt.Errorf("crypto: %w", err)
+	}
+
+	blobStore, err := blob.NewLocalFS(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("blob store: %w", err)
+	}
+
+	// repositories
 	userRepo := user.NewRepository(db.DB)
 	refreshRepo := auth.NewRefreshRepository(db.DB)
+	recordRepo := record.NewRepository(db.DB)
+	projectRepo := record.NewProjectRepository(db.DB)
+
+	// services
 	authSvc := auth.NewService(userRepo, refreshRepo, cfg.JWTSecret, time.Now)
 	authHandler := auth.NewHandler(authSvc)
 
+	upstreamCli := upstream.NewClient()
+	adminStore := admin.NewStore(db.DB, cipher)
+	if err := adminStore.Load(rootCtx); err != nil {
+		return fmt.Errorf("load upstream config: %w", err)
+	}
+
+	recordHandler := record.NewHandler(recordRepo, projectRepo, blobStore, adminStore)
+
+	pool := worker.New(recordRepo, blobStore, upstreamCli, adminStore)
+	adminStore.SetResizer(pool.Resize)
+
+	adminHandler := admin.NewHandler(adminStore, userRepo, recordRepo, upstreamCli, authSvc)
+
+	// boot: ensure admin, sweep stale running, start pool
 	if err := app.EnsureAdmin(rootCtx, userRepo, cfg.AdminEmail); err != nil {
 		return fmt.Errorf("ensure admin: %w", err)
 	}
+	if swept, err := recordRepo.SweepRunningToWaiting(rootCtx); err != nil {
+		slog.Warn("sweep stale running", "err", err)
+	} else if swept > 0 {
+		slog.Info("swept stale running records", "count", swept)
+	}
+	pool.Start(adminStore.WorkerConcurrency())
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -79,22 +120,52 @@ func run() error {
 
 	v1 := engine.Group("/api/v1")
 	{
-		// register / login / refresh are unauthenticated but rate-limited per spec.
-		authPublic := v1.Group("")
-		authPublic.POST("/auth/register",
-			httpx.RateLimit(5, time.Minute, httpx.KeyByIP), authHandler.RegisterEndpoint)
-		authPublic.POST("/auth/login",
-			httpx.RateLimit(5, time.Minute, httpx.KeyByIP), authHandler.LoginEndpoint)
-		authPublic.POST("/auth/refresh",
-			httpx.RateLimit(60, time.Minute, httpx.KeyByIP), authHandler.RefreshEndpoint)
+		// public (rate-limited) auth endpoints
+		v1.POST("/auth/register", httpx.RateLimit(5, time.Minute, httpx.KeyByIP), authHandler.RegisterEndpoint)
+		v1.POST("/auth/login", httpx.RateLimit(5, time.Minute, httpx.KeyByIP), authHandler.LoginEndpoint)
+		v1.POST("/auth/refresh", httpx.RateLimit(60, time.Minute, httpx.KeyByIP), authHandler.RefreshEndpoint)
 
+		// public config (enabled models so the front-end can populate selects)
+		v1.GET("/config", func(c *gin.Context) {
+			httpx.OK(c, gin.H{"enabledModels": adminStore.EnabledModels()})
+		})
+
+		// authenticated user-scope endpoints
 		secured := v1.Group("")
 		secured.Use(auth.RequireAuth(cfg.JWTSecret, userRepo))
-		secured.POST("/auth/logout",
-			httpx.RateLimit(60, time.Minute, httpx.KeyByUser), authHandler.LogoutEndpoint)
+		secured.POST("/auth/logout", httpx.RateLimit(60, time.Minute, httpx.KeyByUser), authHandler.LogoutEndpoint)
 		secured.GET("/auth/me", authHandler.MeEndpoint)
-		secured.POST("/auth/password",
-			httpx.RateLimit(10, time.Minute, httpx.KeyByUser), authHandler.ChangePasswordEndpoint)
+		secured.POST("/auth/password", httpx.RateLimit(10, time.Minute, httpx.KeyByUser), authHandler.ChangePasswordEndpoint)
+
+		secured.POST("/records", httpx.RateLimit(30, time.Minute, httpx.KeyByUser), func(c *gin.Context) {
+			recordHandler.Create(c)
+			pool.Wake()
+		})
+		secured.GET("/records", recordHandler.List)
+		secured.GET("/records/:id", recordHandler.Get)
+		secured.PATCH("/records/:id", recordHandler.Update)
+		secured.DELETE("/records/:id", recordHandler.Delete)
+		secured.GET("/images/:id", recordHandler.StreamImage)
+
+		secured.GET("/projects", recordHandler.ListProjects)
+		secured.POST("/projects", recordHandler.CreateProject)
+		secured.PATCH("/projects/:id", recordHandler.RenameProject)
+		secured.DELETE("/projects/:id", recordHandler.DeleteProject)
+
+		// admin-only endpoints
+		adminGroup := secured.Group("/admin")
+		adminGroup.Use(admin.RequireAdmin())
+		adminGroup.GET("/upstream-configs", adminHandler.GetUpstream)
+		adminGroup.PUT("/upstream-configs", adminHandler.UpdateUpstream)
+		adminGroup.POST("/upstream-configs/test", adminHandler.TestUpstream)
+		adminGroup.GET("/runtime", adminHandler.GetRuntime)
+		adminGroup.PATCH("/runtime", adminHandler.UpdateRuntime)
+		adminGroup.GET("/users", adminHandler.ListUsers)
+		adminGroup.PATCH("/users/:id", adminHandler.UpdateUser)
+		adminGroup.POST("/users/:id/reset-password", adminHandler.ResetPassword)
+		adminGroup.GET("/records", adminHandler.ListRecords)
+		adminGroup.DELETE("/records/:id", adminHandler.DeleteRecord)
+		adminGroup.GET("/stats/overview", adminHandler.StatsOverview)
 	}
 
 	srv := &http.Server{
@@ -119,8 +190,11 @@ func run() error {
 	case <-rootCtx.Done():
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
+	if err := pool.Stop(shutdownCtx); err != nil {
+		slog.Warn("worker pool stop", "err", err)
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}

@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"strconv"
 	"time"
@@ -178,6 +180,37 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, oldPw, newPw
 		return err
 	}
 	return s.refresh.RevokeAllForUser(ctx, userID)
+}
+
+// ResetPasswordByAdmin generates a random temp password, writes it (forcing
+// must_change_password=true) and revokes all refresh tokens.
+func (s *Service) ResetPasswordByAdmin(ctx context.Context, userID int64) (string, error) {
+	if _, err := s.users.FindByID(ctx, userID); err != nil {
+		return "", err
+	}
+	temp, err := randomTempPassword()
+	if err != nil {
+		return "", err
+	}
+	hash, err := HashPassword(temp)
+	if err != nil {
+		return "", err
+	}
+	if err := s.users.UpdatePassword(ctx, userID, hash, true); err != nil {
+		return "", err
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		return "", err
+	}
+	return temp, nil
+}
+
+func randomTempPassword() (string, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
 // issueAuthResponse mints tokens AND packages the public user payload.

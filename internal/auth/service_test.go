@@ -308,3 +308,31 @@ func TestService_Logout_Revokes(t *testing.T) {
 		t.Fatalf("want ErrRefreshRevoked after logout, got %v", err)
 	}
 }
+
+func TestService_ResetPasswordByAdmin(t *testing.T) {
+	svc, _, refresh := newTestService(t)
+	ctx := context.Background()
+	resp, _ := svc.Register(ctx, RegisterReq{Email: "u@x.com", Password: "12345678", DisplayName: "u"})
+
+	temp, err := svc.ResetPasswordByAdmin(ctx, 1)
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if len(temp) < 8 {
+		t.Fatalf("temp pwd too short: %q", temp)
+	}
+
+	// old pwd rejected
+	if _, err := svc.Login(ctx, LoginReq{Email: "u@x.com", Password: "12345678"}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old pwd should fail, got %v", err)
+	}
+	// new temp pwd works
+	if _, err := svc.Login(ctx, LoginReq{Email: "u@x.com", Password: temp}); err != nil {
+		t.Fatalf("new pwd should succeed, got %v", err)
+	}
+	// existing refresh tokens revoked
+	row, _ := refresh.FindByHash(ctx, HashRefreshToken(resp.Tokens.RefreshToken))
+	if !row.Revoked {
+		t.Fatal("admin reset should revoke existing refresh tokens")
+	}
+}

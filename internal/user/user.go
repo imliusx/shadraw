@@ -100,6 +100,52 @@ func (r *Repository) SetRole(ctx context.Context, id int64, role Role) error {
 		Update("role", role).Error
 }
 
+// SetDisabled toggles the disabled flag.
+func (r *Repository) SetDisabled(ctx context.Context, id int64, disabled bool) error {
+	res := r.db.WithContext(ctx).Model(&User{}).
+		Where("id = ?", id).
+		Update("disabled", disabled)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AdminListParams filters the admin user listing.
+type AdminListParams struct {
+	Search   string // matches email substring (case-insensitive)
+	Page     int
+	PageSize int
+}
+
+// AdminList returns paginated users for admin views.
+func (r *Repository) AdminList(ctx context.Context, p AdminListParams) ([]User, int64, error) {
+	q := r.db.WithContext(ctx).Model(&User{})
+	if p.Search != "" {
+		q = q.Where("email ILIKE ?", "%"+p.Search+"%")
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if p.Page < 1 {
+		p.Page = 1
+	}
+	if p.PageSize <= 0 || p.PageSize > 100 {
+		p.PageSize = 20
+	}
+	var out []User
+	err := q.Select("id", "email", "password_hash", "display_name", "role", "disabled", "must_change_password", "created_at", "updated_at").
+		Order("id DESC").
+		Offset((p.Page - 1) * p.PageSize).
+		Limit(p.PageSize).
+		Find(&out).Error
+	return out, total, err
+}
+
 // EmailExists reports whether the email is taken.
 func (r *Repository) EmailExists(ctx context.Context, email string) (bool, error) {
 	var n int64
