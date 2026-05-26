@@ -64,9 +64,18 @@ type UpdateUserReq struct {
 	Role     *string `json:"role,omitempty" binding:"omitempty,oneof=admin user"`
 }
 
+// TestConnectionReq is the optional body of POST /upstream-configs/test.
+// If Model is supplied, the backend actually calls the upstream image API
+// with that model; otherwise it falls back to GET /v1/models.
+type TestConnectionReq struct {
+	Model string `json:"model"`
+}
+
 // TestConnectionResp is the response of POST /api/v1/admin/upstream-configs/test.
 type TestConnectionResp struct {
-	OK      bool   `json:"ok"`
-	Status  int    `json:"status"`
-	Message string `json:"message,omitempty"`
+	OK         bool   `json:"ok"`
+	Status     int    `json:"status"`
+	Message    string `json:"message,omitempty"`
+	ElapsedMs  int64  `json:"elapsedMs,omitempty"`
+	ImageBytes int    `json:"imageBytes,omitempty"`
 }

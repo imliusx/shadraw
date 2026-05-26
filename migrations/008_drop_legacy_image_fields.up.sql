@@ -1,0 +1,3 @@
+ALTER TABLE records
+    DROP COLUMN IF EXISTS ratio,
+    DROP COLUMN IF EXISTS pixels;

@@ -144,6 +144,10 @@ func run() error {
 		secured.GET("/records", recordHandler.List)
 		secured.GET("/records/:id", recordHandler.Get)
 		secured.PATCH("/records/:id", recordHandler.Update)
+		secured.POST("/records/:id/retry", httpx.RateLimit(30, time.Minute, httpx.KeyByUser), func(c *gin.Context) {
+			recordHandler.Retry(c)
+			pool.Wake()
+		})
 		secured.DELETE("/records/:id", recordHandler.Delete)
 		secured.GET("/images/:id", recordHandler.StreamImage)
 

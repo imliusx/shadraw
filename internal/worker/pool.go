@@ -177,31 +177,27 @@ func (p *Pool) tickOnce(ctx context.Context) (bool, error) {
 	result, gerr := p.upstream.Generate(ctx, cfg, upstream.GenerateParams{
 		Model:           rec.Model,
 		Prompt:          rec.Prompt,
-		Ratio:           rec.Ratio,
-		Pixels:          rec.Pixels,
+		ImageParams:     rec.ImageParams,
 		ReferenceImages: refs,
 	})
 	if gerr != nil {
-		msg := "生成失败"
-		var ue *upstream.Error
-		if errors.As(gerr, &ue) {
-			msg = fmt.Sprintf("%s: %s", ue.Kind, truncate(ue.Message, 200))
-		} else {
-			msg = truncate(gerr.Error(), 200)
-		}
-		_ = p.records.MarkFailed(ctx, rec.ID, msg)
+		_ = p.records.MarkFailed(ctx, rec.ID, userFacingGenerationError(gerr))
+		return true, nil
+	}
+	if len(result.Image) == 0 {
+		_ = p.records.MarkFailed(ctx, rec.ID, "生成失败，请稍后重试")
 		return true, nil
 	}
 
 	userKey := fmt.Sprintf("user-%d", rec.UserID)
-	fileKey := rec.UUID + ".png"
-	path, perr := p.blob.Put(ctx, "images", userKey, fileKey, result.PNG)
+	fileKey := fmt.Sprintf("%s.%s", rec.UUID, result.Extension)
+	path, perr := p.blob.Put(ctx, "images", userKey, fileKey, result.Image)
 	if perr != nil {
 		_ = p.records.MarkFailed(ctx, rec.ID, "存储失败: "+perr.Error())
 		return true, nil
 	}
 
-	if merr := p.records.MarkCompleted(ctx, rec.ID, path); merr != nil {
+	if merr := p.records.StoreGenerated(ctx, rec.ID, path); merr != nil {
 		slog.Warn("mark completed failed", "id", rec.ID, "err", merr)
 	}
 	return true, nil
@@ -212,4 +208,27 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func userFacingGenerationError(err error) string {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return "生成失败，请稍后重试"
+	}
+	switch ue.Kind {
+	case upstream.ErrKindAuth:
+		return "上游认证失败，请检查后台上游配置"
+	case upstream.ErrKindRateLimited:
+		return "上游请求过于频繁，请稍后重试"
+	case upstream.ErrKindBadRequest:
+		return "生成参数不被上游接受，请调整参数后重试"
+	case upstream.ErrKindNotFound:
+		return "上游接口或模型不存在，请检查后台上游配置"
+	case upstream.ErrKindNetwork:
+		return "无法连接上游服务，请稍后重试"
+	case upstream.ErrKindUpstream:
+		return "上游服务暂时无法完成生成，请稍后重试"
+	default:
+		return "生成失败，请稍后重试"
+	}
 }

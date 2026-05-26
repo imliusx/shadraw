@@ -11,6 +11,7 @@ import (
 
 	"github.com/liusx/shadraw/internal/auth"
 	"github.com/liusx/shadraw/internal/httpx"
+	"github.com/liusx/shadraw/internal/imagegen"
 	"github.com/liusx/shadraw/internal/record"
 	"github.com/liusx/shadraw/internal/upstream"
 	"github.com/liusx/shadraw/internal/user"
@@ -64,22 +65,81 @@ func (h *Handler) TestUpstream(c *gin.Context) {
 		httpx.OK(c, TestConnectionResp{OK: false, Status: 0, Message: "未配置 baseUrl 或 apiKey"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
-	defer cancel()
-	err := h.upstreamCl.TestConnection(ctx, cfg)
-	if err == nil {
-		httpx.OK(c, TestConnectionResp{OK: true, Status: 200})
+
+	// Optional body: if a model is supplied, do a real generation; otherwise
+	// fall back to a cheap GET /v1/models probe.
+	var req TestConnectionReq
+	_ = c.ShouldBindJSON(&req) // body is optional
+
+	if req.Model == "" {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		defer cancel()
+		if err := h.upstreamCl.TestConnection(ctx, cfg); err != nil {
+			resp := TestConnectionResp{OK: false}
+			var ue *upstream.Error
+			if errors.As(err, &ue) {
+				resp.Status = ue.Status
+				resp.Message = string(ue.Kind) + ": " + ue.Message
+			} else {
+				resp.Message = err.Error()
+			}
+			httpx.OK(c, resp)
+			return
+		}
+		httpx.OK(c, TestConnectionResp{OK: true, Status: 200, Message: "/v1/models 可达"})
 		return
 	}
-	var ue *upstream.Error
-	resp := TestConnectionResp{OK: false}
-	if errors.As(err, &ue) {
-		resp.Status = ue.Status
-		resp.Message = string(ue.Kind) + ": " + ue.Message
-	} else {
-		resp.Message = err.Error()
+
+	// Validate model is in the admin whitelist (if one is configured).
+	if enabled := h.store.EnabledModels(); len(enabled) > 0 {
+		found := false
+		for _, m := range enabled {
+			if m == req.Model {
+				found = true
+				break
+			}
+		}
+		if !found {
+			httpx.OK(c, TestConnectionResp{
+				OK: false, Status: 0,
+				Message: "model 不在已启用列表中: " + req.Model,
+			})
+			return
+		}
 	}
-	httpx.OK(c, resp)
+
+	// Real image generation with a tiny prompt. 5 min upper bound matches worker.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+	start := time.Now()
+	result, err := h.upstreamCl.Generate(ctx, cfg, upstream.GenerateParams{
+		Model:  req.Model,
+		Prompt: "a small red circle on a white background, simple test",
+		ImageParams: imagegen.Params{
+			Size:    "1024x1024",
+			Quality: imagegen.QualityLow,
+		},
+	})
+	elapsed := time.Since(start).Milliseconds()
+	if err != nil {
+		resp := TestConnectionResp{OK: false, ElapsedMs: elapsed}
+		var ue *upstream.Error
+		if errors.As(err, &ue) {
+			resp.Status = ue.Status
+			resp.Message = string(ue.Kind) + ": " + ue.Message
+		} else {
+			resp.Message = err.Error()
+		}
+		httpx.OK(c, resp)
+		return
+	}
+	httpx.OK(c, TestConnectionResp{
+		OK:         true,
+		Status:     200,
+		Message:    "成功生成测试图片",
+		ElapsedMs:  elapsed,
+		ImageBytes: len(result.Image),
+	})
 }
 
 // ---- runtime ----

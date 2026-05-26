@@ -3,16 +3,17 @@ package record
 import (
 	"strconv"
 	"time"
+
+	"github.com/liusx/shadraw/internal/imagegen"
 )
 
 // CreateRecordReq is the body of POST /api/v1/records.
 type CreateRecordReq struct {
-	Prompt          string   `json:"prompt" binding:"required,min=1,max=4096"`
-	Model           string   `json:"model" binding:"required,max=64"`
-	Ratio           string   `json:"ratio" binding:"required,max=16"`
-	Pixels          string   `json:"pixels" binding:"required,max=16"`
-	ProjectID       *string  `json:"projectId"` // string-encoded int64; optional
-	ReferenceImages []string `json:"referenceImages" binding:"omitempty,max=4,dive,startswith=data:image/"`
+	Prompt          string           `json:"prompt" binding:"required,min=1,max=4096"`
+	Model           string           `json:"model" binding:"required,max=64"`
+	ImageParams     *imagegen.Params `json:"imageParams"`
+	ProjectID       *string          `json:"projectId"` // string-encoded int64; optional
+	ReferenceImages []string         `json:"referenceImages" binding:"omitempty,max=4,dive,startswith=data:image/"`
 }
 
 // UpdateRecordReq is the body of PATCH /api/v1/records/:id.
@@ -33,35 +34,34 @@ type RenameProjectReq struct {
 
 // RecordDTO is the public shape.
 type RecordDTO struct {
-	ID              string    `json:"id"`
-	UUID            string    `json:"uuid"`
-	Prompt          string    `json:"prompt"`
-	Model           string    `json:"model"`
-	Ratio           string    `json:"ratio"`
-	Pixels          string    `json:"pixels"`
-	Status          string    `json:"status"`
-	Favorite        bool      `json:"favorite"`
-	HasImage        bool      `json:"hasImage"`
-	Error           string    `json:"error,omitempty"`
-	ProjectID       string    `json:"projectId,omitempty"`
-	ReferenceCount  int       `json:"referenceCount"`
-	StartedAt       string    `json:"startedAt,omitempty"`
-	CompletedAt     string    `json:"completedAt,omitempty"`
-	CreatedAt       string    `json:"createdAt"`
+	ID             string          `json:"id"`
+	UUID           string          `json:"uuid"`
+	Prompt         string          `json:"prompt"`
+	Model          string          `json:"model"`
+	ImageParams    imagegen.Params `json:"imageParams"`
+	Status         string          `json:"status"`
+	Favorite       bool            `json:"favorite"`
+	HasImage       bool            `json:"hasImage"`
+	Error          string          `json:"error,omitempty"`
+	ProjectID      string          `json:"projectId,omitempty"`
+	ReferenceCount int             `json:"referenceCount"`
+	StartedAt      string          `json:"startedAt,omitempty"`
+	CompletedAt    string          `json:"completedAt,omitempty"`
+	CreatedAt      string          `json:"createdAt"`
 }
 
 // ToDTO converts a Record to its public shape.
 func ToDTO(r *Record) RecordDTO {
+	hasImage := r.ImagePath != nil && *r.ImagePath != ""
 	out := RecordDTO{
 		ID:             strconv.FormatInt(r.ID, 10),
 		UUID:           r.UUID,
 		Prompt:         r.Prompt,
 		Model:          r.Model,
-		Ratio:          r.Ratio,
-		Pixels:         r.Pixels,
+		ImageParams:    imagegen.Normalize(&r.ImageParams),
 		Status:         string(r.Status),
 		Favorite:       r.Favorite,
-		HasImage:       r.ImagePath != nil && *r.ImagePath != "",
+		HasImage:       hasImage,
 		ReferenceCount: len(r.ReferenceImages),
 		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
 	}

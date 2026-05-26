@@ -3,10 +3,13 @@ package upstream
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/liusx/shadraw/internal/imagegen"
 )
 
 const fakePNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -19,6 +22,13 @@ func TestClient_ImagesGenerations(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer sk-test" {
 			t.Fatalf("missing bearer; got %q", r.Header.Get("Authorization"))
 		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["size"] != "1024x1024" || body["quality"] != "medium" || body["n"] != float64(1) {
+			t.Fatalf("unexpected body %#v", body)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"data":[{"b64_json":"` + fakePNG + `"}]}`))
 	}))
@@ -26,14 +36,71 @@ func TestClient_ImagesGenerations(t *testing.T) {
 
 	c := NewClient()
 	res, err := c.Generate(context.Background(), Config{BaseURL: srv.URL, APIKey: "sk-test"}, GenerateParams{
-		Model: ImagesAPIModel, Prompt: "a cat", Ratio: "1:1", Pixels: "2K",
+		Model:  ImagesAPIModel,
+		Prompt: "a cat",
+		ImageParams: imagegen.Params{
+			Size:    "1024x1024",
+			Quality: imagegen.QualityMedium,
+		},
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	want, _ := base64.StdEncoding.DecodeString(fakePNG)
-	if string(res.PNG) != string(want) {
+	if string(res.Image) != string(want) {
 		t.Fatalf("png mismatch")
+	}
+}
+
+func TestClient_ImagesGenerations_OfficialParams(t *testing.T) {
+	compression := 80
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		want := map[string]any{
+			"model":              ImagesAPIModel,
+			"prompt":             "a cat",
+			"size":               "1536x1024",
+			"quality":            "high",
+			"n":                  float64(1),
+			"background":         "transparent",
+			"moderation":         "low",
+			"output_format":      "webp",
+			"output_compression": float64(80),
+		}
+		for key, expected := range want {
+			if body[key] != expected {
+				t.Fatalf("%s = %#v, want %#v; body %#v", key, body[key], expected, body)
+			}
+		}
+		w.Write([]byte(`{"data":[{"b64_json":"` + fakePNG + `"}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient()
+	res, err := c.Generate(context.Background(), Config{BaseURL: srv.URL, APIKey: "sk-test"}, GenerateParams{
+		Model:  ImagesAPIModel,
+		Prompt: "a cat",
+		ImageParams: imagegen.Params{
+			Size:              "1536x1024",
+			Quality:           imagegen.QualityHigh,
+			N:                 3,
+			Background:        imagegen.BackgroundTransparent,
+			Moderation:        imagegen.ModerationLow,
+			OutputFormat:      imagegen.OutputFormatWebP,
+			OutputCompression: &compression,
+		},
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if res.MIME != "image/webp" || res.Extension != "webp" {
+		t.Fatalf("unexpected result format: %#v", res)
+	}
+	if len(res.Image) == 0 {
+		t.Fatal("empty png")
 	}
 }
 
@@ -51,6 +118,9 @@ func TestClient_ImagesEdits_WithReference(t *testing.T) {
 		if len(r.MultipartForm.File["image"]) == 0 {
 			t.Fatal("missing image part")
 		}
+		if got := r.MultipartForm.Value["size"]; len(got) != 1 || got[0] != "1024x1024" {
+			t.Fatalf("size field = %#v", got)
+		}
 		w.Write([]byte(`{"data":[{"b64_json":"` + fakePNG + `"}]}`))
 	}))
 	defer srv.Close()
@@ -58,13 +128,18 @@ func TestClient_ImagesEdits_WithReference(t *testing.T) {
 	dataURL := "data:image/png;base64," + fakePNG
 	c := NewClient()
 	res, err := c.Generate(context.Background(), Config{BaseURL: srv.URL, APIKey: "sk-test"}, GenerateParams{
-		Model: ImagesAPIModel, Prompt: "edit", Ratio: "1:1", Pixels: "2K",
+		Model:  ImagesAPIModel,
+		Prompt: "edit",
+		ImageParams: imagegen.Params{
+			Size:    "1024x1024",
+			Quality: imagegen.QualityMedium,
+		},
 		ReferenceImages: []ReferenceImage{{DataURL: dataURL}},
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if len(res.PNG) == 0 {
+	if len(res.Image) == 0 {
 		t.Fatal("empty png")
 	}
 }
@@ -79,6 +154,15 @@ func TestClient_ResponsesSSE(t *testing.T) {
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
+		var body struct {
+			Tools []map[string]any `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(body.Tools) != 1 || body.Tools[0]["size"] != "1024x1024" || body.Tools[0]["quality"] != "medium" {
+			t.Fatalf("unexpected tools %#v", body.Tools)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte(sse))
 	}))
@@ -86,12 +170,17 @@ func TestClient_ResponsesSSE(t *testing.T) {
 
 	c := NewClient()
 	res, err := c.Generate(context.Background(), Config{BaseURL: srv.URL, APIKey: "sk-test"}, GenerateParams{
-		Model: "gpt-5.3-codex", Prompt: "a cat", Ratio: "1:1", Pixels: "2K",
+		Model:  "gpt-5.3-codex",
+		Prompt: "a cat",
+		ImageParams: imagegen.Params{
+			Size:    "1024x1024",
+			Quality: imagegen.QualityMedium,
+		},
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if len(res.PNG) == 0 {
+	if len(res.Image) == 0 {
 		t.Fatal("empty png")
 	}
 }

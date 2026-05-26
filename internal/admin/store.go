@@ -96,8 +96,8 @@ func (s *Store) Snapshot() upstream.Config {
 func (s *Store) EnabledModels() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]string, len(s.cached.EnabledModels))
-	copy(out, s.cached.EnabledModels)
+	out := make([]string, 0, len(s.cached.EnabledModels))
+	out = append(out, s.cached.EnabledModels...)
 	return out
 }
 
@@ -187,9 +187,11 @@ func (s *Store) UpdateWorkerConcurrency(ctx context.Context, n int, actorID int6
 func (s *Store) View() UpstreamConfigDTO {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	models := make([]string, 0, len(s.cached.EnabledModels))
+	models = append(models, s.cached.EnabledModels...)
 	dto := UpstreamConfigDTO{
 		BaseURL:           s.cached.BaseURL,
-		EnabledModels:     append([]string(nil), s.cached.EnabledModels...),
+		EnabledModels:     models,
 		WorkerConcurrency: int(s.cached.WorkerConcurrency),
 	}
 	if s.apiKey != "" {

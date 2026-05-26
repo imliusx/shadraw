@@ -18,6 +18,8 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+
+	"github.com/liusx/shadraw/internal/imagegen"
 )
 
 const (
@@ -25,6 +27,10 @@ const (
 	sseEvtImageGen       = "response.image_generation_call"
 	systemPromptForCodex = "你是一个图片生成助手。用户要求你生成图片时,你必须调用 image_generation 工具来生成图片,不要用文字描述图片内容。直接生成图片,不要多说任何话。"
 )
+
+type b64ImageData struct {
+	B64JSON string `json:"b64_json"`
+}
 
 // Image generation model that takes the OpenAI /v1/images path.
 const ImagesAPIModel = "gpt-image-2"
@@ -37,6 +43,7 @@ const (
 	ErrKindRateLimited ErrorKind = "rate_limited"
 	ErrKindBadRequest  ErrorKind = "bad_request"
 	ErrKindNotFound    ErrorKind = "not_found"
+	ErrKindUpstream    ErrorKind = "upstream_error"
 	ErrKindNetwork     ErrorKind = "network"
 	ErrKindUnknown     ErrorKind = "unknown"
 )
@@ -62,8 +69,7 @@ type Config struct {
 type GenerateParams struct {
 	Model           string
 	Prompt          string
-	Ratio           string
-	Pixels          string
+	ImageParams     imagegen.Params
 	ReferenceImages []ReferenceImage
 }
 
@@ -74,7 +80,9 @@ type ReferenceImage struct {
 
 // GenerateResult is what comes back from a successful upstream call.
 type GenerateResult struct {
-	PNG       []byte
+	Image     []byte
+	MIME      string
+	Extension string
 	ElapsedMs int64
 }
 
@@ -98,18 +106,24 @@ func (c *Client) Generate(ctx context.Context, cfg Config, p GenerateParams) (*G
 		return nil, &Error{Kind: ErrKindBadRequest, Status: 0, Message: "upstream config not set"}
 	}
 	base := normalizeBaseURL(cfg.BaseURL)
+	p.ImageParams = imagegen.Normalize(&p.ImageParams)
 
-	var png []byte
+	var image []byte
 	var err error
 	if p.Model == ImagesAPIModel {
-		png, err = c.callImages(ctx, base, cfg.APIKey, p)
+		image, err = c.callImages(ctx, base, cfg.APIKey, p)
 	} else {
-		png, err = c.callResponses(ctx, base, cfg.APIKey, p)
+		image, err = c.callResponses(ctx, base, cfg.APIKey, p)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &GenerateResult{PNG: png, ElapsedMs: time.Since(start).Milliseconds()}, nil
+	return &GenerateResult{
+		Image:     image,
+		MIME:      imagegen.MIME(p.ImageParams.OutputFormat),
+		Extension: imagegen.Extension(p.ImageParams.OutputFormat),
+		ElapsedMs: time.Since(start).Milliseconds(),
+	}, nil
 }
 
 // TestConnection probes GET <base>/v1/models. Returns nil on 2xx/4xx (4xx is
@@ -148,13 +162,16 @@ func (c *Client) callImages(ctx context.Context, base, apiKey string, p Generate
 }
 
 func (c *Client) callImagesGenerations(ctx context.Context, base, apiKey string, p GenerateParams) ([]byte, error) {
-	body, _ := json.Marshal(map[string]any{
+	params := imagegen.Normalize(&p.ImageParams)
+	reqBody := map[string]any{
 		"model":   p.Model,
 		"prompt":  p.Prompt,
-		"size":    mapImageSize(p.Ratio),
-		"quality": mapImageQuality(p.Pixels),
-		"n":       1,
-	})
+		"size":    params.Size,
+		"quality": params.Quality,
+		"n":       params.N,
+	}
+	addOptionalImageFields(reqBody, params, true)
+	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/images/generations", bytes.NewReader(body))
 	if err != nil {
 		return nil, &Error{Kind: ErrKindBadRequest, Message: err.Error()}
@@ -171,31 +188,27 @@ func (c *Client) callImagesGenerations(ctx context.Context, base, apiKey string,
 		return nil, classifyHTTPError(resp)
 	}
 	var parsed struct {
-		Data []struct {
-			B64JSON string `json:"b64_json"`
-		} `json:"data"`
+		Data []b64ImageData `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, &Error{Kind: ErrKindUnknown, Message: "decode: " + err.Error()}
 	}
-	if len(parsed.Data) == 0 || parsed.Data[0].B64JSON == "" {
+	if len(parsed.Data) == 0 {
 		return nil, &Error{Kind: ErrKindUnknown, Message: "empty image payload"}
 	}
-	png, err := base64.StdEncoding.DecodeString(parsed.Data[0].B64JSON)
-	if err != nil {
-		return nil, &Error{Kind: ErrKindUnknown, Message: "base64: " + err.Error()}
-	}
-	return png, nil
+	return decodeImageData(parsed.Data)
 }
 
 func (c *Client) callImagesEdits(ctx context.Context, base, apiKey string, p GenerateParams) ([]byte, error) {
 	body := &bytes.Buffer{}
 	mw := multipart.NewWriter(body)
+	params := imagegen.Normalize(&p.ImageParams)
 	_ = mw.WriteField("model", p.Model)
 	_ = mw.WriteField("prompt", p.Prompt)
-	_ = mw.WriteField("size", mapImageSize(p.Ratio))
-	_ = mw.WriteField("quality", mapImageQuality(p.Pixels))
-	_ = mw.WriteField("n", "1")
+	_ = mw.WriteField("size", params.Size)
+	_ = mw.WriteField("quality", string(params.Quality))
+	_ = mw.WriteField("n", fmt.Sprintf("%d", params.N))
+	writeOptionalImageFields(mw, params, true)
 
 	for i, ref := range p.ReferenceImages {
 		mime, raw, err := decodeDataURL(ref.DataURL)
@@ -233,34 +246,35 @@ func (c *Client) callImagesEdits(ctx context.Context, base, apiKey string, p Gen
 		return nil, classifyHTTPError(resp)
 	}
 	var parsed struct {
-		Data []struct {
-			B64JSON string `json:"b64_json"`
-		} `json:"data"`
+		Data []b64ImageData `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, &Error{Kind: ErrKindUnknown, Message: "decode: " + err.Error()}
 	}
-	if len(parsed.Data) == 0 || parsed.Data[0].B64JSON == "" {
+	if len(parsed.Data) == 0 {
 		return nil, &Error{Kind: ErrKindUnknown, Message: "empty image payload"}
 	}
-	png, err := base64.StdEncoding.DecodeString(parsed.Data[0].B64JSON)
-	if err != nil {
-		return nil, &Error{Kind: ErrKindUnknown, Message: "base64: " + err.Error()}
-	}
-	return png, nil
+	return decodeImageData(parsed.Data)
 }
 
 // ---- Responses SSE path ----
 
 func (c *Client) callResponses(ctx context.Context, base, apiKey string, p GenerateParams) ([]byte, error) {
 	userContent := buildResponsesUserContent(p)
+	params := imagegen.Normalize(&p.ImageParams)
+	tool := map[string]any{
+		"type":    "image_generation",
+		"size":    params.Size,
+		"quality": params.Quality,
+	}
+	addOptionalImageFields(tool, params, false)
 	body, _ := json.Marshal(map[string]any{
 		"model": p.Model,
 		"input": []map[string]any{
 			{"role": "system", "content": systemPromptForCodex},
 			{"role": "user", "content": userContent},
 		},
-		"tools":       []map[string]any{{"type": "image_generation", "output_format": "png"}},
+		"tools":       []map[string]any{tool},
 		"tool_choice": map[string]any{"type": "image_generation"},
 		"stream":      true,
 	})
@@ -342,6 +356,20 @@ func (c *Client) callResponses(ctx context.Context, base, apiKey string, p Gener
 	return nil, &Error{Kind: ErrKindUnknown, Message: "SSE 流结束但未捕获到图片"}
 }
 
+func decodeImageData(data []b64ImageData) ([]byte, error) {
+	for i, item := range data {
+		if item.B64JSON == "" {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(item.B64JSON)
+		if err != nil {
+			return nil, &Error{Kind: ErrKindUnknown, Message: fmt.Sprintf("base64[%d]: %v", i, err)}
+		}
+		return raw, nil
+	}
+	return nil, &Error{Kind: ErrKindUnknown, Message: "empty image payload"}
+}
+
 // buildResponsesUserContent matches the front-end shape: text + optional input_image entries.
 func buildResponsesUserContent(p GenerateParams) any {
 	if len(p.ReferenceImages) == 0 {
@@ -385,25 +413,57 @@ func findResultBase64(obj any) string {
 
 func classifyHTTPError(resp *http.Response) *Error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-	msg := strings.TrimSpace(string(body))
+	raw := strings.TrimSpace(string(body))
+
+	// Try to extract a human-readable message from common JSON error shapes:
+	//   { "error": { "message": "...", "type": "..." } }   ← OpenAI / OneAPI / NewAPI
+	//   { "error": "..." }                                 ← simpler proxies
+	//   { "message": "..." }                               ← misc
+	msg := raw
+	if len(raw) > 0 && raw[0] == '{' {
+		var probe struct {
+			Error struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+			} `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(raw), &probe) == nil {
+			switch {
+			case probe.Error.Message != "":
+				if probe.Error.Type != "" {
+					msg = probe.Error.Type + ": " + probe.Error.Message
+				} else {
+					msg = probe.Error.Message
+				}
+			case probe.Message != "":
+				msg = probe.Message
+			}
+		}
+	}
 	if len(msg) > 500 {
 		msg = msg[:500] + "..."
 	}
+
 	kind := ErrKindUnknown
-	switch resp.StatusCode {
-	case 401, 403:
+	switch {
+	case resp.StatusCode == 401 || resp.StatusCode == 403:
 		kind = ErrKindAuth
-	case 404:
+	case resp.StatusCode == 404:
 		kind = ErrKindNotFound
-	case 429:
+	case resp.StatusCode == 429:
 		kind = ErrKindRateLimited
-	case 400, 422:
+	case resp.StatusCode == 400 || resp.StatusCode == 422:
 		kind = ErrKindBadRequest
+	case resp.StatusCode >= 500:
+		// 5xx 一律视为上游/网关问题
+		kind = ErrKindUpstream
 	}
 	slog.Warn("upstream non-2xx",
 		"status", resp.StatusCode,
 		"kind", string(kind),
-		"snippet", msg)
+		"snippet", raw,
+		"message", msg)
 	return &Error{Kind: kind, Status: resp.StatusCode, Message: msg}
 }
 
@@ -455,26 +515,72 @@ func normalizeBaseURL(u string) string {
 	return v
 }
 
-func mapImageSize(ratio string) string {
-	switch ratio {
-	case "3:4", "9:16":
-		return "1024x1536"
-	case "4:3", "16:9":
-		return "1536x1024"
-	case "1:1":
-		return "1024x1024"
-	default:
-		return "auto"
+func addOptionalImageFields(dst map[string]any, params imagegen.Params, includeImagesOnly bool) {
+	if params.Background != "" {
+		dst["background"] = params.Background
+	}
+	if params.Moderation != "" {
+		dst["moderation"] = params.Moderation
+	}
+	if params.OutputFormat != "" {
+		dst["output_format"] = params.OutputFormat
+	}
+	if params.OutputCompression != nil {
+		dst["output_compression"] = *params.OutputCompression
+	}
+	if params.Stream != nil {
+		dst["stream"] = *params.Stream
+	}
+	if params.PartialImages != nil {
+		dst["partial_images"] = *params.PartialImages
+	}
+	if params.InputFidelity != "" {
+		dst["input_fidelity"] = params.InputFidelity
+	}
+	if params.ResponseFormat != "" && includeImagesOnly {
+		dst["response_format"] = params.ResponseFormat
+	}
+	if params.Style != "" && includeImagesOnly {
+		dst["style"] = params.Style
+	}
+	if params.User != "" && includeImagesOnly {
+		dst["user"] = params.User
 	}
 }
 
-func mapImageQuality(pixels string) string {
-	switch pixels {
-	case "4K":
-		return "high"
-	case "1K":
-		return "low"
-	default:
-		return "medium"
+func writeOptionalImageFields(mw *multipart.Writer, params imagegen.Params, includeImagesOnly bool) {
+	fields := map[string]string{}
+	if params.Background != "" {
+		fields["background"] = string(params.Background)
+	}
+	if params.Moderation != "" {
+		fields["moderation"] = string(params.Moderation)
+	}
+	if params.OutputFormat != "" {
+		fields["output_format"] = string(params.OutputFormat)
+	}
+	if params.OutputCompression != nil {
+		fields["output_compression"] = fmt.Sprintf("%d", *params.OutputCompression)
+	}
+	if params.Stream != nil {
+		fields["stream"] = fmt.Sprintf("%t", *params.Stream)
+	}
+	if params.PartialImages != nil {
+		fields["partial_images"] = fmt.Sprintf("%d", *params.PartialImages)
+	}
+	if params.InputFidelity != "" {
+		fields["input_fidelity"] = params.InputFidelity
+	}
+	if params.ResponseFormat != "" && includeImagesOnly {
+		fields["response_format"] = params.ResponseFormat
+	}
+	if params.Style != "" && includeImagesOnly {
+		fields["style"] = params.Style
+	}
+	if params.User != "" && includeImagesOnly {
+		fields["user"] = params.User
+	}
+	for key, value := range fields {
+		_ = mw.WriteField(key, value)
 	}
 }

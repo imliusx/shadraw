@@ -10,6 +10,7 @@ import (
 
 	"github.com/liusx/shadraw/internal/blob"
 	"github.com/liusx/shadraw/internal/httpx"
+	"github.com/liusx/shadraw/internal/imagegen"
 )
 
 // UpstreamConfigReader exposes the enabled-models / connectivity required to
@@ -68,8 +69,7 @@ func (h *Handler) Create(c *gin.Context) {
 		ProjectID:       projID,
 		Prompt:          req.Prompt,
 		Model:           req.Model,
-		Ratio:           req.Ratio,
-		Pixels:          req.Pixels,
+		ImageParams:     imagegen.Normalize(req.ImageParams),
 		Status:          StatusWaiting,
 		ReferenceImages: StringSlice(req.ReferenceImages),
 	}
@@ -198,6 +198,27 @@ func (h *Handler) Update(c *gin.Context) {
 	httpx.OK(c, gin.H{"record": ToDTO(rec)})
 }
 
+func (h *Handler) Retry(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	userID := mustUserID(c)
+	if userID == 0 {
+		return
+	}
+	rec, err := h.records.RetryFailed(c.Request.Context(), id, userID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.Fail(c, http.StatusConflict, httpx.CodeConflict, "只能重试失败的记录")
+			return
+		}
+		httpx.Fail(c, http.StatusInternalServerError, httpx.CodeInternalError, "internal error")
+		return
+	}
+	httpx.OK(c, gin.H{"record": ToDTO(rec)})
+}
+
 func (h *Handler) Delete(c *gin.Context) {
 	id, ok := parseIDParam(c, "id")
 	if !ok {
@@ -250,9 +271,10 @@ func (h *Handler) StreamImage(c *gin.Context) {
 		httpx.Fail(c, http.StatusNotFound, httpx.CodeNotFound, "image not found on disk")
 		return
 	}
-	c.Header("Content-Type", "image/png")
+	mime := imagegen.MIME(imagegen.Normalize(&rec.ImageParams).OutputFormat)
+	c.Header("Content-Type", mime)
 	c.Header("Cache-Control", "private, max-age=86400")
-	c.Data(http.StatusOK, "image/png", buf.Bytes())
+	c.Data(http.StatusOK, mime, buf.Bytes())
 }
 
 // ---- projects ----

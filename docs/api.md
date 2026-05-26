@@ -1,6 +1,6 @@
-# shadraw API — v1
+# shadraw API - v1
 
-> 第 1 轮 MVP 范围：Auth 6 个接口。后续轮次会扩展 records / projects / admin。
+> Auth、records、projects、admin runtime 的 v1 contract 摘要。
 
 所有接口遵循 [接口规范](https://github.com/liusx/shadraw-ui/blob/main/.trellis/tasks/05-25-shadraw-backend-bootstrap/design.md#10-接口设计规范本轮强制落实)（响应外壳、错误码、状态码、ID 字符串化、时间 UTC）。
 
@@ -23,6 +23,7 @@
 | `conflict` | 资源冲突，如邮箱已注册（409） |
 | `rate_limited` | 命中限流（429，含 `Retry-After` 头） |
 | `internal_error` | 服务端异常（500） |
+| `upstream_error` | 上游接口异常（502） |
 
 ---
 
@@ -179,3 +180,92 @@
 ## 健康检查
 
 `GET /healthz` → `200 { "data": { "status": "ok" }, "error": null }`，不带 v1 前缀。
+
+---
+
+## POST /records
+
+创建一条生图任务。图片参数统一使用 OpenAI 官方字段 `imageParams`。
+
+- 鉴权：Bearer
+- 请求体：
+
+```json
+{
+  "prompt": "a cinematic product photo of a red chair",
+  "model": "gpt-image-2",
+  "imageParams": {
+    "size": "1536x1024",
+    "quality": "high",
+    "background": "auto",
+    "moderation": "auto",
+    "output_format": "png",
+    "output_compression": 90,
+    "stream": false,
+    "partial_images": 0,
+    "input_fidelity": "high",
+    "response_format": "b64_json",
+    "style": "natural",
+    "user": "user-12"
+  },
+  "referenceImages": ["data:image/png;base64,..."],
+  "projectId": "7"
+}
+```
+
+- 201 响应：
+
+```json
+{
+  "data": {
+    "record": {
+      "id": "42",
+      "uuid": "3a5f...",
+      "prompt": "a cinematic product photo of a red chair",
+      "model": "gpt-image-2",
+      "imageParams": {
+        "size": "1536x1024",
+        "quality": "high",
+        "background": "auto",
+        "moderation": "auto",
+        "output_format": "png"
+      },
+      "status": "waiting",
+      "favorite": false,
+      "hasImage": false,
+      "referenceCount": 1,
+      "createdAt": "2026-05-26T11:08:00Z"
+    }
+  },
+  "error": null
+}
+```
+
+说明：当前产品只支持每条任务生成一张图片。后端会把 `imageParams.n` 固定归一为 `1`，前端不提供图片数量设置。
+
+## GET /records
+
+- 鉴权：Bearer
+- Query：`status`, `projectId`, `favorite`, `page`, `pageSize`
+- 200 响应：`{ "data": { "records": [RecordDTO] }, "error": null, "meta": ... }`
+
+## GET /records/:id
+
+- 鉴权：Bearer
+- 200 响应：`{ "data": { "record": RecordDTO }, "error": null }`
+
+## PATCH /records/:id
+
+- 鉴权：Bearer
+- 请求体：`{ "favorite": true, "projectId": "7" }`
+- `projectId: ""` 或 `null` 表示移出项目。
+
+## POST /records/:id/retry
+
+- 鉴权：Bearer
+- 仅失败记录可重试。
+
+## GET /images/:id
+
+- 鉴权：Bearer
+- 返回该 record 的图片二进制。

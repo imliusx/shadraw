@@ -14,11 +14,11 @@ var ErrNotFound = errors.New("record not found")
 // ListParams filters list queries.
 type ListParams struct {
 	UserID    int64
-	Status    string  // optional
-	ProjectID *int64  // optional; pointer to distinguish "no filter" from "null project"
-	Favorite  *bool   // optional
-	Page      int     // 1-based
-	PageSize  int     // capped at 100
+	Status    string // optional
+	ProjectID *int64 // optional; pointer to distinguish "no filter" from "null project"
+	Favorite  *bool  // optional
+	Page      int    // 1-based
+	PageSize  int    // capped at 100
 }
 
 // Repository persists records.
@@ -30,7 +30,7 @@ func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
 // recordColumns is the projection used for SELECT — keeps queries explicit.
 var recordColumns = []string{
-	"id", "uuid", "user_id", "project_id", "prompt", "model", "ratio", "pixels",
+	"id", "uuid", "user_id", "project_id", "prompt", "model", "image_params",
 	"status", "favorite", "image_path", "error", "reference_images",
 	"started_at", "completed_at", "created_at", "updated_at",
 }
@@ -38,7 +38,7 @@ var recordColumns = []string{
 // Create inserts a new record. The DB default fills uuid; we read it back via RETURNING.
 func (r *Repository) Create(ctx context.Context, rec *Record) error {
 	return r.db.WithContext(ctx).
-		Select("user_id", "project_id", "prompt", "model", "ratio", "pixels", "status", "favorite", "reference_images").
+		Select("user_id", "project_id", "prompt", "model", "image_params", "status", "favorite", "reference_images").
 		Create(rec).Error
 }
 
@@ -86,6 +86,9 @@ func (r *Repository) List(ctx context.Context, p ListParams) ([]Record, int64, e
 		Offset((p.Page - 1) * p.PageSize).
 		Limit(p.PageSize).
 		Find(&out).Error
+	if err != nil {
+		return nil, 0, err
+	}
 	return out, total, err
 }
 
@@ -115,6 +118,27 @@ func (r *Repository) UpdateProject(ctx context.Context, id, userID int64, projec
 		return ErrNotFound
 	}
 	return nil
+}
+
+// RetryFailed resets a failed record to waiting so the worker can process the
+// same record again. Non-failed records are left unchanged and return ErrNotFound.
+func (r *Repository) RetryFailed(ctx context.Context, id, userID int64) (*Record, error) {
+	res := r.db.WithContext(ctx).Model(&Record{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, StatusFailed).
+		Updates(map[string]any{
+			"status":       StatusWaiting,
+			"error":        nil,
+			"started_at":   nil,
+			"completed_at": nil,
+			"image_path":   nil,
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, ErrNotFound
+	}
+	return r.FindByID(ctx, id, userID)
 }
 
 // Delete deletes a record scoped to userID (0 = admin, no scope).
@@ -168,8 +192,11 @@ func (r *Repository) ClaimWaiting(ctx context.Context) (*Record, error) {
 	return r.FindByID(ctx, picked.ID, 0)
 }
 
-// MarkCompleted writes the success outcome.
-func (r *Repository) MarkCompleted(ctx context.Context, id int64, imagePath string) error {
+// StoreGenerated writes the success outcome for a single generated image.
+func (r *Repository) StoreGenerated(ctx context.Context, id int64, imagePath string) error {
+	if imagePath == "" {
+		return errors.New("empty generated image path")
+	}
 	now := time.Now()
 	return r.db.WithContext(ctx).Model(&Record{}).
 		Where("id = ?", id).
@@ -239,18 +266,21 @@ func (r *Repository) AdminList(ctx context.Context, p AdminListParams) ([]Record
 		Offset((p.Page - 1) * p.PageSize).
 		Limit(p.PageSize).
 		Find(&out).Error
+	if err != nil {
+		return nil, 0, err
+	}
 	return out, total, err
 }
 
 // AdminStatsOverview is the dashboard payload.
 type AdminStatsOverview struct {
 	Today struct {
-		Total     int64 `json:"total"`
-		Success   int64 `json:"success"`
-		Failed    int64 `json:"failed"`
-		Running   int64 `json:"running"`
-		Waiting   int64 `json:"waiting"`
-		AvgMs     int64 `json:"avgMs"`
+		Total   int64 `json:"total"`
+		Success int64 `json:"success"`
+		Failed  int64 `json:"failed"`
+		Running int64 `json:"running"`
+		Waiting int64 `json:"waiting"`
+		AvgMs   int64 `json:"avgMs"`
 	} `json:"today"`
 }
 

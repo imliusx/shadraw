@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/liusx/shadraw/internal/imagegen"
 )
 
 // Status enumerates record lifecycle.
@@ -20,23 +22,22 @@ const (
 
 // Record mirrors the records table.
 type Record struct {
-	ID              int64        `gorm:"column:id;primaryKey"`
-	UUID            string       `gorm:"column:uuid;type:uuid"`
-	UserID          int64        `gorm:"column:user_id"`
-	ProjectID       *int64       `gorm:"column:project_id"`
-	Prompt          string       `gorm:"column:prompt"`
-	Model           string       `gorm:"column:model"`
-	Ratio           string       `gorm:"column:ratio"`
-	Pixels          string       `gorm:"column:pixels"`
-	Status          Status       `gorm:"column:status"`
-	Favorite        bool         `gorm:"column:favorite"`
-	ImagePath       *string      `gorm:"column:image_path"`
-	Error           *string      `gorm:"column:error"`
-	ReferenceImages StringSlice  `gorm:"column:reference_images;type:jsonb"`
-	StartedAt       *time.Time   `gorm:"column:started_at"`
-	CompletedAt     *time.Time   `gorm:"column:completed_at"`
-	CreatedAt       time.Time    `gorm:"column:created_at"`
-	UpdatedAt       time.Time    `gorm:"column:updated_at"`
+	ID              int64           `gorm:"column:id;primaryKey"`
+	UUID            string          `gorm:"column:uuid;type:uuid"`
+	UserID          int64           `gorm:"column:user_id"`
+	ProjectID       *int64          `gorm:"column:project_id"`
+	Prompt          string          `gorm:"column:prompt"`
+	Model           string          `gorm:"column:model"`
+	ImageParams     imagegen.Params `gorm:"column:image_params;type:jsonb"`
+	Status          Status          `gorm:"column:status"`
+	Favorite        bool            `gorm:"column:favorite"`
+	ImagePath       *string         `gorm:"column:image_path"`
+	Error           *string         `gorm:"column:error"`
+	ReferenceImages StringSlice     `gorm:"column:reference_images;type:jsonb"`
+	StartedAt       *time.Time      `gorm:"column:started_at"`
+	CompletedAt     *time.Time      `gorm:"column:completed_at"`
+	CreatedAt       time.Time       `gorm:"column:created_at"`
+	UpdatedAt       time.Time       `gorm:"column:updated_at"`
 }
 
 func (Record) TableName() string { return "records" }
