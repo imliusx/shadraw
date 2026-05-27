@@ -1,0 +1,113 @@
+# Production compose for shadraw on a single VPS, fronted by host nginx.
+# Run from this directory: `./deploy.sh` (or see commands inside).
+#
+# Topology:
+#   host nginx (TLS, 80/443) -> 127.0.0.1:3000 (web / next.js)
+#                            -> 127.0.0.1:8080 (api  / go)
+#   api -> db    (postgres, internal docker network only)
+#       -> minio (s3-compatible, internal docker network only)
+#
+# Only `web` and `api` publish ports — and only to the loopback interface,
+# so they are unreachable from the public network. nginx on the host
+# reverse-proxies external traffic to them.
+
+name: shadraw
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [shadraw-net]
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY}
+    volumes:
+      - miniodata:/data
+    networks: [shadraw-net]
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY"; do
+          sleep 1
+        done
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+    networks: [shadraw-net]
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+    depends_on:
+      db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: 8080
+      LOG_LEVEL: info
+      DB_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      MASTER_KEY: ${MASTER_KEY}
+      CORS_ORIGINS: ${SITE_URL}
+      BLOB_DRIVER: s3
+      DATA_DIR: /app/data
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      S3_USE_PATH_STYLE: "true"
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [shadraw-net]
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../../shadraw-ui
+      args:
+        NEXT_PUBLIC_API_BASE: ${SITE_URL}
+    environment:
+      NODE_ENV: production
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [shadraw-net]
+    restart: unless-stopped
+
+networks:
+  shadraw-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  miniodata:
