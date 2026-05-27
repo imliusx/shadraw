@@ -161,6 +161,25 @@ func (h *Handler) UpdateRuntime(c *gin.Context) {
 	httpx.OK(c, gin.H{"workerConcurrency": h.store.WorkerConcurrency()})
 }
 
+// ---- site settings ----
+
+func (h *Handler) GetSite(c *gin.Context) {
+	httpx.OK(c, gin.H{"config": h.store.SiteConfig()})
+}
+
+func (h *Handler) UpdateSite(c *gin.Context) {
+	var req UpdateSiteReq
+	if !httpx.BindJSON(c, &req) {
+		return
+	}
+	actorID, _ := strconv.ParseInt(httpx.UserIDFrom(c), 10, 64)
+	if err := h.store.UpdateSiteConfig(c.Request.Context(), req.SiteTitle, actorID); err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, httpx.CodeInternalError, "internal error")
+		return
+	}
+	httpx.OK(c, gin.H{"config": h.store.SiteConfig()})
+}
+
 // ---- users ----
 
 func (h *Handler) ListUsers(c *gin.Context) {

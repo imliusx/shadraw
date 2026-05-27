@@ -3,9 +3,11 @@ package record
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ErrNotFound is returned when a record / project doesn't exist (or isn't yours).
@@ -13,12 +15,21 @@ var ErrNotFound = errors.New("record not found")
 
 // ListParams filters list queries.
 type ListParams struct {
-	UserID    int64
-	Status    string // optional
-	ProjectID *int64 // optional; pointer to distinguish "no filter" from "null project"
-	Favorite  *bool  // optional
-	Page      int    // 1-based
-	PageSize  int    // capped at 100
+	UserID              int64
+	Status              string // optional
+	ProjectID           *int64 // optional
+	ProjectUnclassified bool
+	Favorite            *bool // optional
+	Query               string
+	Page                int // 1-based
+	PageSize            int // capped at 100
+}
+
+// PublicListParams filters the community gallery.
+type PublicListParams struct {
+	Query    string
+	Page     int
+	PageSize int
 }
 
 // Repository persists records.
@@ -31,8 +42,8 @@ func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 // recordColumns is the projection used for SELECT — keeps queries explicit.
 var recordColumns = []string{
 	"id", "uuid", "user_id", "project_id", "prompt", "model", "image_params",
-	"status", "favorite", "image_path", "error", "reference_images",
-	"started_at", "completed_at", "created_at", "updated_at",
+	"status", "favorite", "is_public", "prompt_public", "image_path", "error", "upstream_error", "reference_images",
+	"started_at", "completed_at", "published_at", "created_at", "updated_at",
 }
 
 // Create inserts a new record. The DB default fills uuid; we read it back via RETURNING.
@@ -58,14 +69,40 @@ func (r *Repository) FindByID(ctx context.Context, id, userID int64) (*Record, e
 	return &rec, nil
 }
 
+// FindVisibleImageByID returns an image-ready record if it belongs to the
+// caller or has been published to the community gallery.
+func (r *Repository) FindVisibleImageByID(ctx context.Context, id, userID int64) (*Record, error) {
+	q := r.db.WithContext(ctx).
+		Select(recordColumns).
+		Where("id = ? AND image_path IS NOT NULL AND image_path <> ''", id)
+	if userID > 0 {
+		q = q.Where("(user_id = ? OR is_public = TRUE)", userID)
+	} else {
+		q = q.Where("is_public = TRUE")
+	}
+	var rec Record
+	if err := q.Take(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &rec, nil
+}
+
 // List returns paginated records + total count.
 func (r *Repository) List(ctx context.Context, p ListParams) ([]Record, int64, error) {
 	q := r.db.WithContext(ctx).Model(&Record{}).Where("user_id = ?", p.UserID)
 	if p.Status != "" {
 		q = q.Where("status = ?", p.Status)
 	}
+	if strings.TrimSpace(p.Query) != "" {
+		q = q.Where("prompt ILIKE ? ESCAPE '\\'", likePattern(p.Query))
+	}
 	if p.ProjectID != nil {
 		q = q.Where("project_id = ?", *p.ProjectID)
+	} else if p.ProjectUnclassified {
+		q = q.Where("project_id IS NULL")
 	}
 	if p.Favorite != nil {
 		q = q.Where("favorite = ?", *p.Favorite)
@@ -92,11 +129,137 @@ func (r *Repository) List(ctx context.Context, p ListParams) ([]Record, int64, e
 	return out, total, err
 }
 
+// ListPublic returns completed image records published by any user.
+func (r *Repository) ListPublic(ctx context.Context, userID int64, p PublicListParams) ([]Record, int64, error) {
+	q := r.db.WithContext(ctx).
+		Model(&Record{}).
+		Where("is_public = TRUE").
+		Where("status = ?", StatusCompleted).
+		Where("image_path IS NOT NULL AND image_path <> ''")
+	if strings.TrimSpace(p.Query) != "" {
+		q = q.Where("prompt_public = TRUE").
+			Where("prompt ILIKE ? ESCAPE '\\'", likePattern(p.Query))
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if p.Page < 1 {
+		p.Page = 1
+	}
+	if p.PageSize <= 0 || p.PageSize > 100 {
+		p.PageSize = 20
+	}
+	var out []Record
+	err := q.Select(recordColumns).
+		Order("published_at DESC NULLS LAST, id DESC").
+		Offset((p.Page - 1) * p.PageSize).
+		Limit(p.PageSize).
+		Find(&out).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if userID > 0 && len(out) > 0 {
+		if err := r.applyFavoriteFlags(ctx, userID, out); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, err
+}
+
+func likePattern(query string) string {
+	query = strings.TrimSpace(query)
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + replacer.Replace(query) + "%"
+}
+
+func (r *Repository) applyFavoriteFlags(ctx context.Context, userID int64, out []Record) error {
+	ids := make([]int64, 0, len(out))
+	for i := range out {
+		ids = append(ids, out[i].ID)
+	}
+	var favorites []RecordFavorite
+	if err := r.db.WithContext(ctx).
+		Select("record_id").
+		Where("user_id = ? AND record_id IN ?", userID, ids).
+		Find(&favorites).Error; err != nil {
+		return err
+	}
+	favoriteSet := make(map[int64]struct{}, len(favorites))
+	for _, fav := range favorites {
+		favoriteSet[fav.RecordID] = struct{}{}
+	}
+	for i := range out {
+		_, favorited := favoriteSet[out[i].ID]
+		if out[i].UserID == userID {
+			out[i].Favorite = out[i].Favorite || favorited
+			continue
+		}
+		out[i].Favorite = favorited
+	}
+	return nil
+}
+
 // UpdateFavorite toggles favorite for a user's record.
 func (r *Repository) UpdateFavorite(ctx context.Context, id, userID int64, favorite bool) error {
+	var rec Record
+	if err := r.db.WithContext(ctx).
+		Select("id", "user_id", "is_public", "status", "image_path").
+		Where("id = ?", id).
+		Take(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if rec.UserID == userID {
+		res := r.db.WithContext(ctx).Model(&Record{}).
+			Where("id = ? AND user_id = ?", id, userID).
+			Update("favorite", favorite)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}
+	if !rec.IsPublic || rec.Status != StatusCompleted || rec.ImagePath == nil || *rec.ImagePath == "" {
+		return ErrNotFound
+	}
+	if favorite {
+		return r.db.WithContext(ctx).
+			Clauses(clause.OnConflict{DoNothing: true}).
+			Select("user_id", "record_id").
+			Create(&RecordFavorite{
+				UserID:   userID,
+				RecordID: id,
+			}).Error
+	}
+	res := r.db.WithContext(ctx).
+		Where("user_id = ? AND record_id = ?", userID, id).
+		Delete(&RecordFavorite{})
+	if res.Error != nil {
+		return res.Error
+	}
+	return nil
+}
+
+// UpdatePublic toggles community gallery visibility for a completed image.
+func (r *Repository) UpdatePublic(ctx context.Context, id, userID int64, isPublic, promptPublic bool) error {
+	updates := map[string]any{
+		"is_public":     isPublic,
+		"prompt_public": promptPublic,
+	}
+	if isPublic {
+		updates["published_at"] = time.Now()
+	} else {
+		updates["published_at"] = nil
+		updates["prompt_public"] = true
+	}
 	res := r.db.WithContext(ctx).Model(&Record{}).
-		Where("id = ? AND user_id = ?", id, userID).
-		Update("favorite", favorite)
+		Where("id = ? AND user_id = ? AND status = ? AND image_path IS NOT NULL AND image_path <> ''", id, userID, StatusCompleted).
+		Updates(updates)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -126,11 +289,12 @@ func (r *Repository) RetryFailed(ctx context.Context, id, userID int64) (*Record
 	res := r.db.WithContext(ctx).Model(&Record{}).
 		Where("id = ? AND user_id = ? AND status = ?", id, userID, StatusFailed).
 		Updates(map[string]any{
-			"status":       StatusWaiting,
-			"error":        nil,
-			"started_at":   nil,
-			"completed_at": nil,
-			"image_path":   nil,
+			"status":         StatusWaiting,
+			"error":          nil,
+			"upstream_error": nil,
+			"started_at":     nil,
+			"completed_at":   nil,
+			"image_path":     nil,
 		})
 	if res.Error != nil {
 		return nil, res.Error
@@ -201,23 +365,36 @@ func (r *Repository) StoreGenerated(ctx context.Context, id int64, imagePath str
 	return r.db.WithContext(ctx).Model(&Record{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
-			"status":       StatusCompleted,
-			"image_path":   imagePath,
-			"completed_at": now,
-			"error":        nil,
+			"status":         StatusCompleted,
+			"image_path":     imagePath,
+			"completed_at":   now,
+			"error":          nil,
+			"upstream_error": nil,
 		}).Error
 }
 
 // MarkFailed writes the failure outcome.
 func (r *Repository) MarkFailed(ctx context.Context, id int64, msg string) error {
+	return r.MarkFailedWithUpstreamError(ctx, id, msg, "")
+}
+
+// MarkFailedWithUpstreamError writes a user-facing failure and optional raw
+// upstream detail for debugging failed generations.
+func (r *Repository) MarkFailedWithUpstreamError(ctx context.Context, id int64, msg, upstreamError string) error {
 	now := time.Now()
+	updates := map[string]any{
+		"status":       StatusFailed,
+		"error":        msg,
+		"completed_at": now,
+	}
+	if upstreamError != "" {
+		updates["upstream_error"] = upstreamError
+	} else {
+		updates["upstream_error"] = nil
+	}
 	return r.db.WithContext(ctx).Model(&Record{}).
 		Where("id = ?", id).
-		Updates(map[string]any{
-			"status":       StatusFailed,
-			"error":        msg,
-			"completed_at": now,
-		}).Error
+		Updates(updates).Error
 }
 
 // SweepRunningToWaiting flips any record stuck in running back to waiting at boot.

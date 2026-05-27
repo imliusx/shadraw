@@ -1,4 +1,5 @@
 /data/
+/minio-data/
 /pgdata/
 /.env
 /tmp/

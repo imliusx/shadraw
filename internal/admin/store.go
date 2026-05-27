@@ -5,6 +5,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ type UpstreamConfig struct {
 	APIKeyCipher      []byte    `gorm:"column:api_key_cipher"`
 	EnabledModels     JSONArray `gorm:"column:enabled_models;type:jsonb"`
 	WorkerConcurrency int16     `gorm:"column:worker_concurrency"`
+	SiteTitle         string    `gorm:"column:site_title"`
 	UpdatedBy         *int64    `gorm:"column:updated_by"`
 	CreatedAt         time.Time `gorm:"column:created_at"`
 	UpdatedAt         time.Time `gorm:"column:updated_at"`
@@ -56,16 +58,19 @@ func (s *Store) SetResizer(fn func(int)) {
 func (s *Store) Load(ctx context.Context) error {
 	var row UpstreamConfig
 	err := s.db.WithContext(ctx).
-		Select("id", "base_url", "api_key_cipher", "enabled_models", "worker_concurrency", "updated_by", "created_at", "updated_at").
+		Select("id", "base_url", "api_key_cipher", "enabled_models", "worker_concurrency", "site_title", "updated_by", "created_at", "updated_at").
 		Where("id = 1").Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// Seed empty row so admin can fill it in.
-		row = UpstreamConfig{ID: 1, EnabledModels: JSONArray{}, WorkerConcurrency: 4}
+		row = UpstreamConfig{ID: 1, EnabledModels: JSONArray{}, WorkerConcurrency: 4, SiteTitle: "shadraw"}
 		if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
 			return err
 		}
 	} else if err != nil {
 		return err
+	}
+	if strings.TrimSpace(row.SiteTitle) == "" {
+		row.SiteTitle = "shadraw"
 	}
 
 	var apiKey string
@@ -99,6 +104,18 @@ func (s *Store) EnabledModels() []string {
 	out := make([]string, 0, len(s.cached.EnabledModels))
 	out = append(out, s.cached.EnabledModels...)
 	return out
+}
+
+// AppConfig returns the public front-end config.
+func (s *Store) AppConfig() AppConfigDTO {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	models := make([]string, 0, len(s.cached.EnabledModels))
+	models = append(models, s.cached.EnabledModels...)
+	return AppConfigDTO{
+		EnabledModels: models,
+		SiteTitle:     siteTitleOrDefault(s.cached.SiteTitle),
+	}
 }
 
 // WorkerConcurrency returns the live concurrency value.
@@ -183,6 +200,34 @@ func (s *Store) UpdateWorkerConcurrency(ctx context.Context, n int, actorID int6
 	return nil
 }
 
+// SiteConfig returns the admin-editable site settings.
+func (s *Store) SiteConfig() SiteConfigDTO {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return SiteConfigDTO{SiteTitle: siteTitleOrDefault(s.cached.SiteTitle)}
+}
+
+// UpdateSiteConfig persists the site settings.
+func (s *Store) UpdateSiteConfig(ctx context.Context, title string, actorID int64) error {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "shadraw"
+	}
+	if err := s.db.WithContext(ctx).Model(&UpstreamConfig{}).
+		Where("id = 1").
+		Updates(map[string]any{
+			"site_title": title,
+			"updated_by": actorID,
+		}).Error; err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.cached.SiteTitle = title
+	s.cached.UpdatedBy = &actorID
+	s.mu.Unlock()
+	return nil
+}
+
 // View returns the public DTO with apiKey masked.
 func (s *Store) View() UpstreamConfigDTO {
 	s.mu.RLock()
@@ -199,4 +244,12 @@ func (s *Store) View() UpstreamConfigDTO {
 		dto.APIKeySet = true
 	}
 	return dto
+}
+
+func siteTitleOrDefault(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "shadraw"
+	}
+	return title
 }

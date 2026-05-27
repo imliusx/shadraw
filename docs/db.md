@@ -84,6 +84,63 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 | `expires_at` | 默认 issue 时 + 7 天（`auth.RefreshTTL`） |
 | `revoked` | 主动 logout、refresh rotation、change password 后置 true |
 
+## 011_record_visibility
+
+```sql
+ALTER TABLE records
+    ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN published_at TIMESTAMPTZ;
+
+CREATE INDEX idx_records_public_gallery
+ON records (published_at DESC, id DESC)
+WHERE is_public = TRUE AND status = 'completed' AND image_path IS NOT NULL;
+```
+
+| 列 | 说明 |
+|---|---|
+| `is_public` | 用户是否发布到社区画廊；默认 false，生成图片默认私密 |
+| `published_at` | 发布到社区画廊的时间；取消公开时清空 |
+
+## 012_record_prompt_visibility
+
+```sql
+ALTER TABLE records
+    ADD COLUMN prompt_public BOOLEAN NOT NULL DEFAULT TRUE;
+```
+
+| 列 | 说明 |
+|---|---|
+| `prompt_public` | 公开到社区画廊时是否同时公开提示词；默认 true；取消公开时重置为 true |
+
+## 013_record_favorites
+
+```sql
+CREATE TABLE record_favorites (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    record_id   BIGINT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+| 列 | 说明 |
+|---|---|
+| `user_id` | 收藏公开图片的用户 |
+| `record_id` | 被收藏的图片记录 |
+
+## 014_site_title
+
+```sql
+ALTER TABLE upstream_configs
+    ADD COLUMN site_title TEXT NOT NULL DEFAULT 'shadraw'
+        CHECK (char_length(btrim(site_title)) BETWEEN 1 AND 64);
+```
+
+| 列 | 说明 |
+|---|---|
+| `site_title` | 管理员配置的网站标题；用于前端浏览器标题、顶部品牌和登录页品牌文案 |
+
 ## 迁移规则
 
 - 工具：`golang-migrate/migrate v4`，文件名 `NNN_short_name.up.sql` / `.down.sql`。

@@ -65,7 +65,7 @@ func run() error {
 		return fmt.Errorf("crypto: %w", err)
 	}
 
-	blobStore, err := blob.NewLocalFS(cfg.DataDir)
+	blobStore, err := newBlobStore(rootCtx, cfg)
 	if err != nil {
 		return fmt.Errorf("blob store: %w", err)
 	}
@@ -125,9 +125,9 @@ func run() error {
 		v1.POST("/auth/login", httpx.RateLimit(5, time.Minute, httpx.KeyByIP), authHandler.LoginEndpoint)
 		v1.POST("/auth/refresh", httpx.RateLimit(60, time.Minute, httpx.KeyByIP), authHandler.RefreshEndpoint)
 
-		// public config (enabled models so the front-end can populate selects)
+		// public config (enabled models + site title so the front-end can hydrate shells)
 		v1.GET("/config", func(c *gin.Context) {
-			httpx.OK(c, gin.H{"enabledModels": adminStore.EnabledModels()})
+			httpx.OK(c, adminStore.AppConfig())
 		})
 
 		// authenticated user-scope endpoints
@@ -164,6 +164,8 @@ func run() error {
 		adminGroup.POST("/upstream-configs/test", adminHandler.TestUpstream)
 		adminGroup.GET("/runtime", adminHandler.GetRuntime)
 		adminGroup.PATCH("/runtime", adminHandler.UpdateRuntime)
+		adminGroup.GET("/site-settings", adminHandler.GetSite)
+		adminGroup.PATCH("/site-settings", adminHandler.UpdateSite)
 		adminGroup.GET("/users", adminHandler.ListUsers)
 		adminGroup.PATCH("/users/:id", adminHandler.UpdateUser)
 		adminGroup.POST("/users/:id/reset-password", adminHandler.ResetPassword)
@@ -204,6 +206,22 @@ func run() error {
 	}
 	slog.Info("server stopped")
 	return nil
+}
+
+func newBlobStore(ctx context.Context, cfg *config.Config) (blob.Store, error) {
+	switch cfg.BlobDriver {
+	case "s3":
+		return blob.NewS3(ctx, blob.S3Config{
+			Endpoint:     cfg.S3Endpoint,
+			Region:       cfg.S3Region,
+			Bucket:       cfg.S3Bucket,
+			AccessKey:    cfg.S3AccessKey,
+			SecretKey:    cfg.S3SecretKey,
+			UsePathStyle: cfg.S3UsePathStyle,
+		})
+	default:
+		return blob.NewLocalFS(cfg.DataDir)
+	}
 }
 
 func initLogger(level string) {

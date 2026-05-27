@@ -33,7 +33,7 @@ shadraw/
 ├── docs/
 │   ├── api.md             # 完整接口文档
 │   └── db.md              # 表结构与迁移规则
-├── data/                  # 运行时挂卷（本轮未用）
+├── data/                  # 本地文件存储挂卷
 ├── docker-compose.yml
 ├── Dockerfile
 └── Makefile
@@ -72,7 +72,56 @@ make run
 | `ADMIN_EMAIL` | ✅ | 首位管理员邮箱，启动时引导 |
 | `MASTER_KEY` | ✅ | 32 字节 base64，后续 AES-GCM 加密 apiKey 用 |
 | `CORS_ORIGINS` | | 前端 origin 白名单，逗号分隔；默认 `http://localhost:3000` |
+| `BLOB_DRIVER` | | 图片存储驱动：`local` 或 `s3`，应用默认 `local`；`.env.example` 使用 `s3` 以配合 docker compose MinIO |
 | `DATA_DIR` | | 运行时数据目录，默认 `./data` |
+| `S3_ENDPOINT` | `BLOB_DRIVER=s3` 时必填 | S3 兼容 endpoint，例如 `http://localhost:9000` / `http://minio:9000` |
+| `S3_REGION` | | S3 region，MinIO 可用默认 `us-east-1` |
+| `S3_BUCKET` | `BLOB_DRIVER=s3` 时必填 | 图片对象所在 bucket |
+| `S3_ACCESS_KEY_ID` | `BLOB_DRIVER=s3` 时必填 | S3 / MinIO access key |
+| `S3_SECRET_ACCESS_KEY` | `BLOB_DRIVER=s3` 时必填 | S3 / MinIO secret key |
+| `S3_USE_PATH_STYLE` | | 是否使用 path-style URL，MinIO 默认 `true` |
+
+## 图片存储
+
+默认使用本地文件系统，生成图写入 `DATA_DIR/images/user-<id>/<record-uuid>.<ext>`，数据库只保存相对路径。
+
+如需使用 MinIO / S3 兼容对象存储：
+
+```bash
+BLOB_DRIVER=s3
+S3_ENDPOINT=http://minio:9000
+S3_REGION=us-east-1
+S3_BUCKET=shadraw
+S3_ACCESS_KEY_ID=shadraw
+S3_SECRET_ACCESS_KEY=shadrawsecret
+S3_USE_PATH_STYLE=true
+```
+
+`docker compose up --build` 会启动 MinIO 和 `minio-init`，自动创建默认 bucket。MinIO 控制台地址是 `http://localhost:9001`。
+如果 API 运行在 Docker Compose 内部，`S3_ENDPOINT` 应使用 `http://minio:9000`；如果 API 直接在宿主机运行，则使用 `http://localhost:9000`。
+
+切换存储驱动不会自动迁移旧图片；已有本地图片可以用迁移命令复制到 bucket。迁移会保留数据库里已存的相对路径，例如 `DATA_DIR/images/user-13/a.png` 会上传为对象 key `images/user-13/a.png`，所以不需要改数据库。
+
+```bash
+# 先确保 MinIO 已启动。命令在宿主机运行时 endpoint 用 localhost。
+S3_ENDPOINT=http://localhost:9000 \
+S3_BUCKET=shadraw \
+S3_ACCESS_KEY_ID=shadraw \
+S3_SECRET_ACCESS_KEY=shadrawsecret \
+go run ./cmd/migrate-blobs -data-dir ./data
+
+# 只预览将要上传的文件
+go run ./cmd/migrate-blobs -dry-run -data-dir ./data
+
+# 迁移后校验 MinIO 中对象是否存在且大小一致
+S3_ENDPOINT=http://localhost:9000 \
+S3_BUCKET=shadraw \
+S3_ACCESS_KEY_ID=shadraw \
+S3_SECRET_ACCESS_KEY=shadrawsecret \
+go run ./cmd/migrate-blobs -verify-only -data-dir ./data
+```
+
+迁移命令默认读取 `.env` 和 `DATA_DIR=./data`，只上传 `DATA_DIR/images` 下的文件，并跳过 `.DS_Store` 等隐藏文件。它可以重复运行；同名对象会被覆盖。确认迁移成功前不要删除本地 `data/images`。
 
 ## 接口（v1）
 

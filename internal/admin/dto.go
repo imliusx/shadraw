@@ -46,11 +46,27 @@ type UpstreamConfigDTO struct {
 	WorkerConcurrency int      `json:"workerConcurrency"`
 }
 
+// AppConfigDTO is the public app config used by the front-end before and after login.
+type AppConfigDTO struct {
+	EnabledModels []string `json:"enabledModels"`
+	SiteTitle     string   `json:"siteTitle"`
+}
+
+// SiteConfigDTO is the admin-editable site settings shape.
+type SiteConfigDTO struct {
+	SiteTitle string `json:"siteTitle"`
+}
+
 // UpdateUpstreamReq is the body of PUT /api/v1/admin/upstream-configs.
 type UpdateUpstreamReq struct {
 	BaseURL       string   `json:"baseUrl" binding:"omitempty,max=512"`
 	APIKey        *string  `json:"apiKey,omitempty"` // nil = unchanged; "" = clear; "***...***" = unchanged
 	EnabledModels []string `json:"enabledModels" binding:"omitempty,dive,max=64"`
+}
+
+// UpdateSiteReq is the body of PATCH /api/v1/admin/site-settings.
+type UpdateSiteReq struct {
+	SiteTitle string `json:"siteTitle" binding:"required,min=1,max=64"`
 }
 
 // UpdateRuntimeReq is the body of PATCH /api/v1/admin/runtime.

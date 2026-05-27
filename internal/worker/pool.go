@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,7 +182,7 @@ func (p *Pool) tickOnce(ctx context.Context) (bool, error) {
 		ReferenceImages: refs,
 	})
 	if gerr != nil {
-		_ = p.records.MarkFailed(ctx, rec.ID, userFacingGenerationError(gerr))
+		_ = p.records.MarkFailedWithUpstreamError(ctx, rec.ID, userFacingGenerationError(gerr), upstreamErrorDetail(gerr))
 		return true, nil
 	}
 	if len(result.Image) == 0 {
@@ -221,7 +222,10 @@ func userFacingGenerationError(err error) string {
 	case upstream.ErrKindRateLimited:
 		return "上游请求过于频繁，请稍后重试"
 	case upstream.ErrKindBadRequest:
-		return "生成参数不被上游接受，请调整参数后重试"
+		if isSafetyRejection(ue.Message) {
+			return "提示词被安全系统拒绝，请调整提示词后重试"
+		}
+		return "生成请求被上游拒绝，请查看详情后重试"
 	case upstream.ErrKindNotFound:
 		return "上游接口或模型不存在，请检查后台上游配置"
 	case upstream.ErrKindNetwork:
@@ -231,4 +235,20 @@ func userFacingGenerationError(err error) string {
 	default:
 		return "生成失败，请稍后重试"
 	}
+}
+
+func isSafetyRejection(message string) bool {
+	normalized := strings.ToLower(message)
+	return strings.Contains(normalized, "moderation_blocked") ||
+		strings.Contains(normalized, "content_policy_violation") ||
+		strings.Contains(normalized, "image_generation_user_error") ||
+		strings.Contains(normalized, "rejected by the safety system")
+}
+
+func upstreamErrorDetail(err error) string {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return truncate(err.Error(), 1000)
+	}
+	return truncate(ue.Error(), 1000)
 }

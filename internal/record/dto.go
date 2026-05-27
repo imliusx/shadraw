@@ -18,8 +18,10 @@ type CreateRecordReq struct {
 
 // UpdateRecordReq is the body of PATCH /api/v1/records/:id.
 type UpdateRecordReq struct {
-	Favorite  *bool   `json:"favorite,omitempty"`
-	ProjectID *string `json:"projectId,omitempty"` // "" = clear; non-empty = move; absent = unchanged
+	Favorite     *bool   `json:"favorite,omitempty"`
+	IsPublic     *bool   `json:"isPublic,omitempty"`
+	PromptPublic *bool   `json:"promptPublic,omitempty"`
+	ProjectID    *string `json:"projectId,omitempty"` // "" = clear; non-empty = move; absent = unchanged
 }
 
 // CreateProjectReq is the body of POST /api/v1/projects.
@@ -41,12 +43,16 @@ type RecordDTO struct {
 	ImageParams    imagegen.Params `json:"imageParams"`
 	Status         string          `json:"status"`
 	Favorite       bool            `json:"favorite"`
+	IsPublic       bool            `json:"isPublic"`
+	PromptPublic   bool            `json:"promptPublic"`
 	HasImage       bool            `json:"hasImage"`
 	Error          string          `json:"error,omitempty"`
+	UpstreamError  string          `json:"upstreamError,omitempty"`
 	ProjectID      string          `json:"projectId,omitempty"`
 	ReferenceCount int             `json:"referenceCount"`
 	StartedAt      string          `json:"startedAt,omitempty"`
 	CompletedAt    string          `json:"completedAt,omitempty"`
+	PublishedAt    string          `json:"publishedAt,omitempty"`
 	CreatedAt      string          `json:"createdAt"`
 }
 
@@ -61,12 +67,17 @@ func ToDTO(r *Record) RecordDTO {
 		ImageParams:    imagegen.Normalize(&r.ImageParams),
 		Status:         string(r.Status),
 		Favorite:       r.Favorite,
+		IsPublic:       r.IsPublic,
+		PromptPublic:   r.PromptPublic,
 		HasImage:       hasImage,
 		ReferenceCount: len(r.ReferenceImages),
 		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if r.Error != nil {
 		out.Error = *r.Error
+	}
+	if r.UpstreamError != nil {
+		out.UpstreamError = *r.UpstreamError
 	}
 	if r.ProjectID != nil {
 		out.ProjectID = strconv.FormatInt(*r.ProjectID, 10)
@@ -76,6 +87,21 @@ func ToDTO(r *Record) RecordDTO {
 	}
 	if r.CompletedAt != nil {
 		out.CompletedAt = r.CompletedAt.UTC().Format(time.RFC3339)
+	}
+	if r.PublishedAt != nil {
+		out.PublishedAt = r.PublishedAt.UTC().Format(time.RFC3339)
+	}
+	return out
+}
+
+// ToPublicDTO converts a record for the community gallery. Private project
+// membership is hidden, and prompt text is omitted unless explicitly public.
+func ToPublicDTO(r *Record) RecordDTO {
+	out := ToDTO(r)
+	out.ProjectID = ""
+	out.UpstreamError = ""
+	if !out.PromptPublic {
+		out.Prompt = ""
 	}
 	return out
 }

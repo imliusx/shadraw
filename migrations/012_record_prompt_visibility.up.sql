@@ -1,0 +1,2 @@
+ALTER TABLE records
+    ADD COLUMN prompt_public BOOLEAN NOT NULL DEFAULT TRUE;

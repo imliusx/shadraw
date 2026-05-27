@@ -114,16 +114,39 @@ func (h *Handler) List(c *gin.Context) {
 	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	query := c.Query("q")
+	if c.Query("scope") == "public" {
+		rows, total, err := h.records.ListPublic(c.Request.Context(), userID, PublicListParams{
+			Query:    query,
+			Page:     page,
+			PageSize: pageSize,
+		})
+		if err != nil {
+			httpx.Fail(c, http.StatusInternalServerError, httpx.CodeInternalError, "internal error")
+			return
+		}
+		out := make([]RecordDTO, len(rows))
+		for i := range rows {
+			out[i] = ToPublicDTO(&rows[i])
+		}
+		httpx.OKWithMeta(c, gin.H{"records": out}, pagingMeta(page, pageSize, total))
+		return
+	}
 	p := ListParams{
 		UserID:   userID,
 		Status:   c.Query("status"),
+		Query:    query,
 		Page:     page,
 		PageSize: pageSize,
 	}
 	if v := c.Query("projectId"); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err == nil {
-			p.ProjectID = &id
+		if v == "none" {
+			p.ProjectUnclassified = true
+		} else {
+			id, err := strconv.ParseInt(v, 10, 64)
+			if err == nil {
+				p.ProjectID = &id
+			}
 		}
 	}
 	if v := c.Query("favorite"); v == "true" || v == "false" {
@@ -161,6 +184,20 @@ func (h *Handler) Update(c *gin.Context) {
 		if err := h.records.UpdateFavorite(c.Request.Context(), id, userID, *req.Favorite); err != nil {
 			if errors.Is(err, ErrNotFound) {
 				httpx.Fail(c, http.StatusNotFound, httpx.CodeNotFound, "record 不存在")
+				return
+			}
+			httpx.Fail(c, http.StatusInternalServerError, httpx.CodeInternalError, "internal error")
+			return
+		}
+	}
+	if req.IsPublic != nil {
+		promptPublic := false
+		if req.PromptPublic != nil {
+			promptPublic = *req.PromptPublic
+		}
+		if err := h.records.UpdatePublic(c.Request.Context(), id, userID, *req.IsPublic, promptPublic); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				httpx.Fail(c, http.StatusConflict, httpx.CodeConflict, "只有已完成的图片可以公开")
 				return
 			}
 			httpx.Fail(c, http.StatusInternalServerError, httpx.CodeInternalError, "internal error")
@@ -253,7 +290,7 @@ func (h *Handler) StreamImage(c *gin.Context) {
 	if userID == 0 {
 		return
 	}
-	rec, err := h.records.FindByID(c.Request.Context(), id, userID)
+	rec, err := h.records.FindVisibleImageByID(c.Request.Context(), id, userID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httpx.Fail(c, http.StatusNotFound, httpx.CodeNotFound, "record 不存在")
@@ -268,7 +305,7 @@ func (h *Handler) StreamImage(c *gin.Context) {
 	}
 	var buf bytes.Buffer
 	if gerr := h.blob.Get(c.Request.Context(), *rec.ImagePath, &buf); gerr != nil {
-		httpx.Fail(c, http.StatusNotFound, httpx.CodeNotFound, "image not found on disk")
+		httpx.Fail(c, http.StatusNotFound, httpx.CodeNotFound, "image not found")
 		return
 	}
 	mime := imagegen.MIME(imagegen.Normalize(&rec.ImageParams).OutputFormat)

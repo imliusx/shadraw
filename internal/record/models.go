@@ -31,16 +31,31 @@ type Record struct {
 	ImageParams     imagegen.Params `gorm:"column:image_params;type:jsonb"`
 	Status          Status          `gorm:"column:status"`
 	Favorite        bool            `gorm:"column:favorite"`
+	IsPublic        bool            `gorm:"column:is_public"`
+	PromptPublic    bool            `gorm:"column:prompt_public"`
 	ImagePath       *string         `gorm:"column:image_path"`
 	Error           *string         `gorm:"column:error"`
+	UpstreamError   *string         `gorm:"column:upstream_error"`
 	ReferenceImages StringSlice     `gorm:"column:reference_images;type:jsonb"`
 	StartedAt       *time.Time      `gorm:"column:started_at"`
 	CompletedAt     *time.Time      `gorm:"column:completed_at"`
+	PublishedAt     *time.Time      `gorm:"column:published_at"`
 	CreatedAt       time.Time       `gorm:"column:created_at"`
 	UpdatedAt       time.Time       `gorm:"column:updated_at"`
 }
 
 func (Record) TableName() string { return "records" }
+
+// RecordFavorite stores a user's collection relation for a record.
+type RecordFavorite struct {
+	ID        int64     `gorm:"column:id;primaryKey"`
+	UserID    int64     `gorm:"column:user_id"`
+	RecordID  int64     `gorm:"column:record_id"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
+func (RecordFavorite) TableName() string { return "record_favorites" }
 
 // Project mirrors the projects table.
 type Project struct {

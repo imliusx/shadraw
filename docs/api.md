@@ -181,6 +181,23 @@
 
 `GET /healthz` → `200 { "data": { "status": "ok" }, "error": null }`，不带 v1 前缀。
 
+## GET /config
+
+返回前端启动所需的公开配置。
+
+- 鉴权：无
+- 200 响应：
+
+```json
+{
+  "data": {
+    "enabledModels": ["gpt-image-2"],
+    "siteTitle": "shadraw"
+  },
+  "error": null
+}
+```
+
 ---
 
 ## POST /records
@@ -232,7 +249,11 @@
       },
       "status": "waiting",
       "favorite": false,
+      "isPublic": false,
+      "promptPublic": true,
       "hasImage": false,
+      "error": "提示词被安全系统拒绝，请调整提示词后重试",
+      "upstreamError": "upstream bad_request (400): invalid_request_error: ...",
       "referenceCount": 1,
       "createdAt": "2026-05-26T11:08:00Z"
     }
@@ -243,10 +264,15 @@
 
 说明：当前产品只支持每条任务生成一张图片。后端会把 `imageParams.n` 固定归一为 `1`，前端不提供图片数量设置。
 
+失败记录会返回面向用户的 `error`。如果上游返回了可解析错误，当前用户自己的记录还会返回 `upstreamError` 作为调试详情；社区公开列表不会暴露该字段。
+
 ## GET /records
 
 - 鉴权：Bearer
-- Query：`status`, `projectId`, `favorite`, `page`, `pageSize`
+- Query：`status`, `projectId`, `favorite`, `scope`, `q`, `page`, `pageSize`
+- `scope` 默认是当前用户记录；`scope=public` 返回社区公开画廊，限定为已完成且有图片的公开记录。若记录 `promptPublic=false`，社区列表中的 `prompt` 返回空字符串。社区列表中的 `favorite` 表示当前用户是否收藏该公开图片。
+- `q` 按提示词模糊搜索；社区公开列表只搜索 `promptPublic=true` 的记录，避免用私密提示词命中结果。
+- `projectId=none` 表示未分类记录。
 - 200 响应：`{ "data": { "records": [RecordDTO] }, "error": null, "meta": ... }`
 
 ## GET /records/:id
@@ -257,8 +283,11 @@
 ## PATCH /records/:id
 
 - 鉴权：Bearer
-- 请求体：`{ "favorite": true, "projectId": "7" }`
+- 请求体：`{ "favorite": true, "isPublic": true, "promptPublic": true, "projectId": "7" }`
+- `favorite` 对自己的记录更新记录字段；对他人的公开图片写入当前用户的收藏关系，不影响作者自己的收藏状态。
 - `projectId: ""` 或 `null` 表示移出项目。
+- `isPublic: true` 会把已完成图片发布到社区画廊；新生成图片默认 `isPublic=false`。
+- `promptPublic` 仅在公开图片时生效，表示是否同时向社区公开提示词；公开时省略该字段按 `false` 处理，取消公开会重置为 `true`。
 
 ## POST /records/:id/retry
 
@@ -269,3 +298,38 @@
 
 - 鉴权：Bearer
 - 返回该 record 的图片二进制。
+- 当前用户可读取自己的图片；其他用户只能读取已公开的图片。
+
+---
+
+## GET /admin/site-settings
+
+读取站点设置。
+
+- 鉴权：Bearer + admin
+- 200 响应：
+
+```json
+{
+  "data": {
+    "config": {
+      "siteTitle": "shadraw"
+    }
+  },
+  "error": null
+}
+```
+
+## PATCH /admin/site-settings
+
+更新站点标题。
+
+- 鉴权：Bearer + admin
+- 请求体：
+
+```json
+{ "siteTitle": "我的生图站" }
+```
+
+- 200 响应：同 `GET /admin/site-settings`
+- 422：`siteTitle` 为空或超过 64 个字符。
